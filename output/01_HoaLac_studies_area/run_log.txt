@@ -1,0 +1,32 @@
+2026-06-03 14:07:15,413 | INFO | ================================================================================
+2026-06-03 14:07:15,413 | INFO | START GIS DOWNLOAD PIPELINE
+2026-06-03 14:07:15,413 | INFO | ================================================================================
+2026-06-03 14:07:15,416 | INFO | Using user-defined Hoa Lac polygon AOI.
+2026-06-03 14:07:15,432 | INFO | Created 1 records
+2026-06-03 14:07:15,440 | INFO | Created 1 records
+2026-06-03 14:07:15,440 | INFO | Metadata saved: output/01_HoaLac_studies_area/metadata
+2026-06-03 14:07:15,440 | INFO | Downloading OSM road network...
+2026-06-03 14:07:16,629 | INFO | Created 5,250 records
+2026-06-03 14:07:16,721 | INFO | Created 5,250 records
+2026-06-03 14:07:16,735 | INFO | Created 2,196 records
+2026-06-03 14:07:16,746 | INFO | OSM roads saved: output/01_HoaLac_studies_area/osm/roads
+2026-06-03 14:07:16,746 | INFO | Downloading extra OSM features...
+2026-06-03 14:07:16,824 | INFO | Created 435 records
+2026-06-03 14:07:16,855 | INFO | Created 435 records
+2026-06-03 14:07:16,862 | INFO | Extra OSM features saved: output/01_HoaLac_studies_area/osm/extra_features
+2026-06-03 14:07:16,866 | INFO | DEM already exists: output/01_HoaLac_studies_area/opentopography/opentopography_SRTMGL1_dem_wgs84.tif
+2026-06-03 14:07:16,894 | INFO | Projected raster already exists: output/01_HoaLac_studies_area/opentopography/opentopography_SRTMGL1_dem_utm.tif
+2026-06-03 14:07:16,907 | WARNING | CPLE_IllegalArg in slope_degree.tif: BLOCKXSIZE can only be used with TILED=YES
+2026-06-03 14:07:16,910 | WARNING | CPLE_IllegalArg in slope_percent.tif: BLOCKXSIZE can only be used with TILED=YES
+2026-06-03 14:07:16,913 | WARNING | CPLE_IllegalArg in aspect_degree.tif: BLOCKXSIZE can only be used with TILED=YES
+2026-06-03 14:07:16,915 | WARNING | CPLE_IllegalArg in hillshade.tif: BLOCKXSIZE can only be used with TILED=YES
+2026-06-03 14:07:16,917 | WARNING | CPLE_IllegalArg in roughness_3x3_m.tif: BLOCKXSIZE can only be used with TILED=YES
+2026-06-03 14:07:16,919 | WARNING | CPLE_IllegalArg in tpi_3x3_m.tif: BLOCKXSIZE can only be used with TILED=YES
+2026-06-03 14:07:16,922 | INFO | Terrain products saved: output/01_HoaLac_studies_area/opentopography/terrain_products
+2026-06-03 14:07:16,922 | INFO | Checking existing OBM source: /home/vinh-longha/Research/UTM/path-finding-demo/output/output_hoalac_openbuildingmap/obm_buildings_hoalac_clipped.gpkg
+2026-06-03 14:07:16,922 | INFO | OBM source size: 9347072 bytes
+2026-06-03 14:07:16,927 | INFO | Copied existing clipped OBM file: /home/vinh-longha/Research/UTM/path-finding-demo/output/output_hoalac_openbuildingmap/obm_buildings_hoalac_clipped.gpkg -> output/01_HoaLac_studies_area/openbuildingmap/clipped/obm_buildings_hoalac_clipped.gpkg
+2026-06-03 14:07:16,927 | INFO | ================================================================================
+2026-06-03 14:07:16,927 | INFO | DONE
+2026-06-03 14:07:16,927 | INFO | Output folder: /home/vinh-longha/Research/UTM/path-finding-demo/output/01_HoaLac_studies_area
+2026-06-03 14:07:16,927 | INFO | ================================================================================

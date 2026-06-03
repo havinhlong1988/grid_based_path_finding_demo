@@ -1,0 +1,1 @@
+No OpenBuildingMap file/URL was provided. OBM step skipped. Add direct .gpkg.bz2/.gpkg links to OBM_URLS or local paths to OBM_LOCAL_FILES in this script.
