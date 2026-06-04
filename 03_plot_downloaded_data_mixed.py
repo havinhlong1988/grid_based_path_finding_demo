@@ -2,87 +2,83 @@
 # -*- coding: utf-8 -*-
 
 """
-Plot Hoa Lac study-area outputs from the mixed download pipeline.
+Create final mixed model and plot categorical 2D/3D model nodes.
 
-Input folder:
-    output/01_HoaLac_studies_area/
+Main logic:
+    - Read raw model:
+          output/02_senario1_no_velocity/raw.xyz
 
-Output folder:
-    figures/01_HoaLac_studies_area/
+      Expected format:
+          lon lat elevation_m slowness
 
-Expected input files, in plotting order:
-    metadata/study_area_aoi.gpkg
-    osm/roads/osm_roads_edges.gpkg
-    osm/roads/osm_road_class_summary.csv
-    osm/extra_features/osm_extra_features.gpkg
-    opentopography/opentopography_SRTMGL1_dem_wgs84.tif
-    opentopography/opentopography_SRTMGL1_dem_utm.tif
-    opentopography/terrain_products/slope_degree.tif
-    opentopography/terrain_products/hillshade.tif
-    openbuildingmap/clipped/obm_buildings_hoalac_clipped.gpkg
+    - Read OBM building polygons:
+          output/01_HoaLac_studies_area/openbuildingmap/clipped/obm_buildings_hoalac_clipped.gpkg
 
-Figures:
-    00_overview_map.png
-    01_study_area_aoi.png
-    02_osm_roads_edges_by_class.png
-    03_osm_road_class_summary.png
-    04_osm_extra_features.png
-    05_opentopography_SRTMGL1_dem_wgs84.png
-    06_opentopography_SRTMGL1_dem_utm.png
-    07_slope_degree.png
-    08_hillshade.png
-    09_obm_buildings_hoalac_clipped.png
+    - Select high-rise buildings from OBM polygons.
+    - Only model nodes inside high-rise building footprints are changed to no-fly slowness.
+    - Existing no-fly zones in raw.xyz remain unchanged.
 
-Notes:
-    - Uses PyGMT for map figures.
-    - Uses matplotlib only for the road-class summary CSV bar chart.
-    - Projected rasters such as UTM DEM/slope/hillshade are temporarily
-      reprojected to EPSG:4326 before plotting with the lon/lat map frame.
+Categorical classes:
+    0 = flyable / normal slowness
+    1 = existing no-fly from raw.xyz
+    2 = new high-rise no-fly
+
+Plots:
+    output/02_senario1_no_velocity/figures/mixed_model_2d_categorical.png
+    output/02_senario1_no_velocity/figures/mixed_model_3d_categorical_0_100m.png
+
+VTK outputs:
+    output/02_senario1_no_velocity/mixed_model.vtk
+    output/02_senario1_no_velocity/mixed_model_nodes.vtk
+    output/02_senario1_no_velocity/mixed_model_cage.vtk
+
+VTK coordinate rule:
+    - If x/y look like lon/lat:
+          x = lon
+          y = lat
+          z = elevation_m / 1000.0
+    - Else:
+          x = x_m / 1000.0
+          y = y_m / 1000.0
+          z = z_m / 1000.0
 """
 
-from __future__ import annotations
-
-import ast
-import warnings
 from pathlib import Path
+import warnings
 
 import numpy as np
 import pandas as pd
 import geopandas as gpd
 import pygmt
-import rasterio
-import rasterio.mask
-import rasterio.warp
-from rasterio.enums import Resampling
-from shapely.geometry import Polygon, mapping
 
-import matplotlib.pyplot as plt
+from shapely.geometry import Polygon
 
 
 # ============================================================
-# 0. USER INPUT PARAMETERS
+# USER SETTINGS
 # ============================================================
 
-DATA_DIR = Path("output/01_HoaLac_studies_area")
-FIG_DIR = Path("figures/01_HoaLac_studies_area")
+RAW_MODEL_FILE = Path("output/02_senario1_no_velocity/raw.xyz")
 
-TMP_DIR = FIG_DIR / "_tmp_reprojected_rasters"
+OBM_BUILDINGS_GPKG = Path(
+    "output/01_HoaLac_studies_area/openbuildingmap/clipped/obm_buildings_hoalac_clipped.gpkg"
+)
 
-# New output files from the download script
-AOI_GPKG = DATA_DIR / "metadata/study_area_aoi.gpkg"
-ROADS_GPKG = DATA_DIR / "osm/roads/osm_roads_edges.gpkg"
-ROAD_SUMMARY_CSV = DATA_DIR / "osm/roads/osm_road_class_summary.csv"
-OSM_EXTRA_GPKG = DATA_DIR / "osm/extra_features/osm_extra_features.gpkg"
+OUT_DIR = Path("output/02_senario1_no_velocity")
+FIG_DIR = OUT_DIR / "figures"
 
-DEM_WGS84_TIF = DATA_DIR / "opentopography/opentopography_SRTMGL1_dem_wgs84.tif"
-DEM_UTM_TIF = DATA_DIR / "opentopography/opentopography_SRTMGL1_dem_utm.tif"
-SLOPE_DEGREE_TIF = DATA_DIR / "opentopography/terrain_products/slope_degree.tif"
-HILLSHADE_TIF = DATA_DIR / "opentopography/terrain_products/hillshade.tif"
+OUT_MIXED_XYZ = OUT_DIR / "mixed_model.xyz"
+OUT_MIXED_VTK = OUT_DIR / "mixed_model.vtk"
+OUT_MIXED_NODES_VTK = OUT_DIR / "mixed_model_nodes.vtk"
+OUT_MIXED_CAGE_VTK = OUT_DIR / "mixed_model_cage.vtk"
 
-OBM_BUILDINGS_GPKG = DATA_DIR / "openbuildingmap/clipped/obm_buildings_hoalac_clipped.gpkg"
+OUT_2D_MODEL_FIG = FIG_DIR / "mixed_model_2d_categorical.png"
+OUT_3D_MODEL_FIG = FIG_DIR / "mixed_model_3d_categorical_0_100m.png"
+
+PROJECTION = "M15c"
+DPI = 300
 
 # Hoa Lac polygon, lon/lat.
-# Used as fallback if the AOI GPKG is missing.
 HOALAC_POLYGON = [
     (105.5035, 21.0145),
     (105.5125, 20.9935),
@@ -95,1044 +91,1034 @@ HOALAC_POLYGON = [
     (105.5035, 21.0145),
 ]
 
-# Figure setting
-PROJECTION = "M15c"
 REGION_PADDING = 0.003
-DPI = 300
 
-# Optional overlay switches
-OVERLAY_ROADS_ON_RASTERS = True
-OVERLAY_BUILDINGS_ON_RASTERS = False
-OVERLAY_AOI_ON_ALL_MAPS = True
+# Slowness no-fly value.
+NO_FLY_SLOWNESS = 1.0e6
 
+# High-rise building selection.
+HEIGHT_COLUMN = "height_m"
+HIGHRISE_HEIGHT_M = None
+HIGHRISE_HEIGHT_PERCENTILE = 90
 
-# ============================================================
-# 1. MAP STYLE PARAMETERS
-# ============================================================
+# If True, every z node under high-rise footprint becomes no-fly.
+# If False, only MIN_HIGHRISE_Z_M to MAX_HIGHRISE_Z_M becomes no-fly.
+SET_FULL_VERTICAL_COLUMN_NO_FLY = True
+MIN_HIGHRISE_Z_M = 0.0
+MAX_HIGHRISE_Z_M = 3000.0
 
+# 3D plotting range in meters.
+PLOT_3D_Z_MIN_M = 0.0
+PLOT_3D_Z_MAX_M = 100.0
+
+# Downsample for 3D plotting only.
+MAX_3D_FLYABLE_POINTS = 120_000
+MAX_3D_EXISTING_NOFLY_POINTS = 120_000
+MAX_3D_HIGHRISE_NOFLY_POINTS = 200_000
+
+PERSPECTIVE_3D = [135, 28]
+ZSIZE_3D = "5c"
+
+# Plot styles.
 POLYGON_PEN = "1.4p,purple"
-ROAD_PEN = "0.45p,gray35"
-BUILDING_FILL = "lightred@65"
-BUILDING_PEN = "0.20p,black@35"
-EXTRA_POLYGON_FILL = "gray80@65"
-EXTRA_LINE_PEN = "0.45p,gray40"
-EXTRA_POINT_STYLE = "c0.08c"
-EXTRA_POINT_FILL = "black"
+HIGHRISE_PEN = "0.55p,green"
+HIGHRISE_FILL = "green@85"
 
-LEGEND_BOX_FILL = "white@10"
-LEGEND_BOX_PEN = "0.5p,black"
-LEGEND_POSITION = "JBL+jBL+o0.2c/0.2c"
-
-ROAD_LEGEND_POSITION = "JBR+jBR+o0.2c/0.2c"
-ROAD_LEGEND_BOX = "+gwhite@10+p0.5p,black"
-
-# Road styles are adapted for both:
-#   1. raw OSM highway classes
-#   2. simplified classes from the download script:
-#      expressway_or_trunk, service_or_track, non_motorized
-ROAD_CLASS_STYLE = {
-    "expressway_or_trunk": {"pen": "1.5p,red",       "label": "Expressway/trunk"},
-    "motorway":            {"pen": "1.5p,red",       "label": "Motorway"},
-    "trunk":               {"pen": "1.4p,orange",    "label": "Trunk"},
-    "primary":             {"pen": "1.3p,yellow",    "label": "Primary"},
-    "secondary":           {"pen": "1.1p,green",     "label": "Secondary"},
-    "tertiary":            {"pen": "1.0p,cyan",      "label": "Tertiary"},
-    "residential":         {"pen": "0.7p,blue",      "label": "Residential"},
-    "service_or_track":    {"pen": "0.6p,gray55",    "label": "Service/track"},
-    "service":             {"pen": "0.6p,gray55",    "label": "Service"},
-    "track":               {"pen": "0.6p,brown",     "label": "Track"},
-    "unclassified":        {"pen": "0.8p,gray35",    "label": "Unclassified"},
-    "non_motorized":       {"pen": "0.5p,magenta",   "label": "Non-motorized"},
-    "path":                {"pen": "0.5p,magenta",   "label": "Path"},
-    "footway":             {"pen": "0.5p,magenta",   "label": "Footway"},
-    "cycleway":            {"pen": "0.5p,darkgreen", "label": "Cycleway"},
-    "pedestrian":          {"pen": "0.6p,darkgray",  "label": "Pedestrian"},
-    "living_street":       {"pen": "0.6p,purple",    "label": "Living street"},
-    "other":               {"pen": "0.5p,black",     "label": "Other"},
+CATEGORY_STYLES = {
+    0: {
+        "name": "Flyable",
+        "fill": "black",
+        "style_2d": "c0.006c",
+        "style_3d": "c0.014c",
+        "transparency_2d": 80,
+        "transparency_3d": 88,
+    },
+    1: {
+        "name": "Existing no-fly",
+        "fill": "red",
+        "style_2d": "c0.014c",
+        "style_3d": "c0.025c",
+        "transparency_2d": 35,
+        "transparency_3d": 45,
+    },
+    2: {
+        "name": "High-rise no-fly",
+        "fill": "cyan",
+        "style_2d": "c0.022c",
+        "style_3d": "c0.040c",
+        "transparency_2d": 5,
+        "transparency_3d": 10,
+    },
 }
 
-ROAD_PLOT_ORDER = [
-    "expressway_or_trunk",
-    "motorway",
-    "trunk",
-    "primary",
-    "secondary",
-    "tertiary",
-    "unclassified",
-    "residential",
-    "service_or_track",
-    "service",
-    "track",
-    "living_street",
-    "non_motorized",
-    "path",
-    "footway",
-    "cycleway",
-    "pedestrian",
-    "other",
-]
+PLOT_HIGHRISE_FOOTPRINT_ON_2D = True
+PLOT_HIGHRISE_FOOTPRINT_ON_3D = True
 
-# OSM extra feature styles.
-# These are deliberately simple so the figure does not become too noisy.
-EXTRA_TAG_PRIORITY = [
-    "water",
-    "waterway",
-    "natural",
-    "landuse",
-    "aeroway",
-    "railway",
-    "amenity",
-    "man_made",
-    "leisure",
-    "barrier",
-    "building",
-]
+CLEANUP_CPT_AND_TEMP_FILES = True
 
-EXTRA_TAG_STYLE = {
-    "water":    {"fill": "skyblue@45",    "pen": "0.25p,blue@40",      "label": "water"},
-    "waterway": {"fill": None,            "pen": "0.65p,blue",         "label": "waterway"},
-    "natural":  {"fill": "darkgreen@75",  "pen": "0.25p,darkgreen@50", "label": "natural"},
-    "landuse":  {"fill": "lightgreen@70", "pen": "0.25p,darkgreen@40", "label": "landuse"},
-    "aeroway":  {"fill": "orange@65",     "pen": "0.40p,orange",      "label": "aeroway"},
-    "railway":  {"fill": None,            "pen": "0.80p,black",       "label": "railway"},
-    "amenity":  {"fill": "yellow@60",     "pen": "0.25p,orange@50",   "label": "amenity"},
-    "man_made": {"fill": "gray70@70",     "pen": "0.25p,gray40",      "label": "man_made"},
-    "leisure":  {"fill": "lightcyan@65",  "pen": "0.25p,cyan@50",     "label": "leisure"},
-    "barrier":  {"fill": None,            "pen": "0.60p,brown",       "label": "barrier"},
-    "building": {"fill": "lightred@70",   "pen": "0.20p,black@35",    "label": "building"},
-}
 
-# Clip vector layers to AOI only for plotting
-# True  = only plot features inside AOI polygon
-# False = plot full geometry from input GPKG
-CLIP_ROADS_TO_AOI_FOR_PLOT = True
-CLIP_BUILDINGS_TO_AOI_FOR_PLOT = True
-CLIP_OSM_EXTRA_TO_AOI_FOR_PLOT = True
-# Plot buildings by height if height column is available. Otherwise plot all with same style.
-PLOT_BUILDINGS_BY_HEIGHT = True
-BUILDING_HEIGHT_COLUMN = "height_m"
 # ============================================================
-# 2. BASIC HELPERS
+# BASIC HELPERS
 # ============================================================
 
-def ensure_dirs() -> None:
+def ensure_dirs():
+    OUT_DIR.mkdir(parents=True, exist_ok=True)
     FIG_DIR.mkdir(parents=True, exist_ok=True)
-    TMP_DIR.mkdir(parents=True, exist_ok=True)
 
 
-def make_map_title(text: str) -> str:
-    return f'WSen+t"{text}"'
-
-
-def get_aoi_gdf() -> gpd.GeoDataFrame:
-    if AOI_GPKG.exists():
-        aoi = gpd.read_file(AOI_GPKG)
-        if aoi.crs is None:
-            aoi = aoi.set_crs("EPSG:4326")
-        return aoi.to_crs("EPSG:4326")
-
+def get_hoalac_polygon():
     geom = Polygon(HOALAC_POLYGON)
     if not geom.is_valid:
         geom = geom.buffer(0)
+    return geom
 
+
+def get_aoi_gdf():
     return gpd.GeoDataFrame(
-        {"name": ["HoaLac_polygon_fallback"]},
-        geometry=[geom],
+        {"name": ["HoaLac_polygon"]},
+        geometry=[get_hoalac_polygon()],
         crs="EPSG:4326",
     )
 
 
-def get_region_from_aoi(aoi: gpd.GeoDataFrame, padding: float = REGION_PADDING) -> list[float]:
-    west, south, east, north = aoi.to_crs("EPSG:4326").total_bounds
-    return [
-        float(west - padding),
-        float(east + padding),
-        float(south - padding),
-        float(north + padding),
-    ]
+def polygon_to_dataframe():
+    return pd.DataFrame(HOALAC_POLYGON, columns=["x", "y"])
 
 
-def plot_aoi_boundary(fig: pygmt.Figure, aoi: gpd.GeoDataFrame, pen: str = POLYGON_PEN) -> None:
-    aoi = aoi.to_crs("EPSG:4326")
+def get_region_from_polygon(padding=REGION_PADDING):
+    poly_df = polygon_to_dataframe()
 
-    for geom in aoi.geometry:
-        if geom is None or geom.is_empty:
-            continue
+    xmin = float(poly_df["x"].min()) - padding
+    xmax = float(poly_df["x"].max()) + padding
+    ymin = float(poly_df["y"].min()) - padding
+    ymax = float(poly_df["y"].max()) + padding
 
-        if geom.geom_type == "Polygon":
-            polys = [geom]
-        elif geom.geom_type == "MultiPolygon":
-            polys = list(geom.geoms)
-        else:
-            continue
-
-        for poly in polys:
-            x, y = poly.exterior.xy
-            fig.plot(x=list(x), y=list(y), pen=pen)
+    return [xmin, xmax, ymin, ymax]
 
 
-def start_map(region: list[float], title: str) -> pygmt.Figure:
+def coordinates_look_lonlat(df):
+    x = df["x"].to_numpy()
+    y = df["y"].to_numpy()
+
+    return (
+        np.nanmin(x) >= -180
+        and np.nanmax(x) <= 180
+        and np.nanmin(y) >= -90
+        and np.nanmax(y) <= 90
+    )
+
+
+def vtk_coordinate_arrays(df):
+    """
+    Convert coordinates for VTK.
+
+    If x/y are lon/lat:
+        keep x/y as lon/lat, convert z from m to km.
+    Else:
+        convert x/y/z from m to km.
+    """
+    is_lonlat = coordinates_look_lonlat(df)
+
+    if is_lonlat:
+        xvtk = df["x"].to_numpy(dtype=float)
+        yvtk = df["y"].to_numpy(dtype=float)
+        zvtk = df["z"].to_numpy(dtype=float) / 1000.0
+        units = "x/y=lonlat, z=km"
+    else:
+        xvtk = df["x"].to_numpy(dtype=float) / 1000.0
+        yvtk = df["y"].to_numpy(dtype=float) / 1000.0
+        zvtk = df["z"].to_numpy(dtype=float) / 1000.0
+        units = "x/y/z=km"
+
+    return xvtk, yvtk, zvtk, units
+
+
+def start_map(region, title):
     fig = pygmt.Figure()
+
+    pygmt.config(
+        MAP_FRAME_TYPE="plain",
+        FORMAT_GEO_MAP="ddd:mmF",
+        FONT_LABEL="10p",
+        FONT_ANNOT_PRIMARY="9p",
+    )
+
     fig.basemap(
         region=region,
         projection=PROJECTION,
         frame=[
-            make_map_title(title),
+            f'WSne+t"{title}"',
             "xaf+lLongitude",
             "yaf+lLatitude",
         ],
     )
+
     return fig
 
 
-def save_fig(fig: pygmt.Figure, out_png: Path) -> None:
-    out_png.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(out_png, dpi=DPI)
-    print(f"[OK] Saved: {out_png}")
-
-
-def read_gpkg_if_exists(path: Path) -> gpd.GeoDataFrame | None:
-    if not path.exists():
-        print(f"[WARN] Missing file: {path}")
-        return None
-
-    gdf = gpd.read_file(path)
-    if gdf.crs is None:
-        gdf = gdf.set_crs("EPSG:4326")
-
-    return gdf.to_crs("EPSG:4326")
-
-def clip_gdf_to_aoi_for_plot(
-    gdf: gpd.GeoDataFrame | None,
-    aoi: gpd.GeoDataFrame,
-    enabled: bool = True,
-    layer_name: str = "layer",
-) -> gpd.GeoDataFrame | None:
-    """
-    Clip vector layer to AOI polygon only for plotting.
-    Original GPKG files are not modified.
-    """
-    if gdf is None or gdf.empty:
-        return gdf
-
-    if not enabled:
-        print(f"[INFO] Plot-time clipping OFF for {layer_name}")
-        return gdf.to_crs("EPSG:4326")
-
-    print(f"[INFO] Plot-time clipping ON for {layer_name}")
-
-    gdf_wgs84 = gdf.to_crs("EPSG:4326").copy()
-    aoi_wgs84 = aoi.to_crs("EPSG:4326").copy()
-
-    n_before = len(gdf_wgs84)
-
-    try:
-        clipped = gpd.clip(gdf_wgs84, aoi_wgs84)
-    except Exception as e:
-        print(f"[WARN] Failed to clip {layer_name}: {e}")
-        return gdf_wgs84
-
-    clipped = clipped[
-        clipped.geometry.notna() &
-        (~clipped.geometry.is_empty)
-    ].copy()
-
-    print(f"[INFO] {layer_name} clipped features: {n_before} -> {len(clipped)}")
-
-    return clipped
-
-def safe_iter_geometries(gdf: gpd.GeoDataFrame):
-    if gdf is None or gdf.empty:
-        return
-
-    gdf = gdf.to_crs("EPSG:4326")
-
-    for geom in gdf.geometry:
-        if geom is None or geom.is_empty:
-            continue
-        yield geom
-
-
-def plot_lines_from_gdf(fig: pygmt.Figure, gdf: gpd.GeoDataFrame, pen: str = ROAD_PEN) -> None:
-    if gdf is None or gdf.empty:
-        return
-
-    for geom in safe_iter_geometries(gdf):
-        if geom.geom_type == "LineString":
-            lines = [geom]
-        elif geom.geom_type == "MultiLineString":
-            lines = list(geom.geoms)
-        else:
-            continue
-
-        for line in lines:
-            coords = np.asarray(line.coords)
-            if coords.shape[0] >= 2:
-                fig.plot(x=coords[:, 0], y=coords[:, 1], pen=pen)
-
-
-def plot_polygons_from_gdf(
-    fig: pygmt.Figure,
-    gdf: gpd.GeoDataFrame,
-    fill: str | None = BUILDING_FILL,
-    pen: str | None = BUILDING_PEN,
-) -> None:
-    if gdf is None or gdf.empty:
-        return
-
-    for geom in safe_iter_geometries(gdf):
-        if geom.geom_type == "Polygon":
-            polys = [geom]
-        elif geom.geom_type == "MultiPolygon":
-            polys = list(geom.geoms)
-        else:
-            continue
-
-        for poly in polys:
-            x, y = poly.exterior.xy
-            fig.plot(x=list(x), y=list(y), fill=fill, pen=pen)
-
-
-def plot_points_from_gdf(
-    fig: pygmt.Figure,
-    gdf: gpd.GeoDataFrame,
-    style: str = EXTRA_POINT_STYLE,
-    fill: str = EXTRA_POINT_FILL,
-    pen: str = "0.1p,black",
-) -> None:
-    if gdf is None or gdf.empty:
-        return
-
-    point_gdf = gdf.to_crs("EPSG:4326").copy()
-    point_gdf["geometry"] = point_gdf.geometry.representative_point()
+def plot_aoi_boundary(fig):
+    poly_df = polygon_to_dataframe()
 
     fig.plot(
-        x=point_gdf.geometry.x,
-        y=point_gdf.geometry.y,
-        style=style,
-        fill=fill,
-        pen=pen,
+        x=poly_df["x"],
+        y=poly_df["y"],
+        pen=POLYGON_PEN,
+        fill=None,
+        label="Hoa Lac boundary",
     )
 
 
-# ============================================================
-# 3. ROAD CLASS HELPERS
-# ============================================================
-
-def parse_possible_list_value(value):
-    """
-    OSMnx may save list-like highway values as Python lists or strings that
-    look like lists. This function extracts the first usable value.
-    """
-    if value is None:
-        return None
-
-    if isinstance(value, (list, tuple)):
-        if len(value) == 0:
-            return None
-        return value[0]
-
-    if isinstance(value, str):
-        value2 = value.strip()
-        if value2.startswith("[") and value2.endswith("]"):
-            try:
-                parsed = ast.literal_eval(value2)
-                if isinstance(parsed, (list, tuple)) and len(parsed) > 0:
-                    return parsed[0]
-            except Exception:
-                pass
-        return value2
-
-    if pd.isna(value):
-        return None
-
-    return str(value)
-
-
-def normalize_road_class(row) -> str:
-    """
-    Use simplified road_class from the download script when available.
-    Otherwise use OSM highway.
-    """
-    for col in ["road_class", "highway_simple", "highway"]:
-        if col in row.index:
-            val = parse_possible_list_value(row[col])
-            if val is not None:
-                val = str(val).strip().lower()
-                if val in ROAD_CLASS_STYLE:
-                    return val
-
-                # Map raw OSM *_link classes to their base class.
-                if val.endswith("_link"):
-                    base = val.replace("_link", "")
-                    if base in ROAD_CLASS_STYLE:
-                        return base
-
-                # Map raw minor classes to our simplified buckets.
-                if val in ["footway", "cycleway", "pedestrian", "path", "steps", "bridleway"]:
-                    return val if val in ROAD_CLASS_STYLE else "non_motorized"
-
-                return "other"
-
-    return "other"
-
-
-def plot_lines_by_road_class(fig: pygmt.Figure, roads_gdf: gpd.GeoDataFrame) -> list[str]:
-    if roads_gdf is None or roads_gdf.empty:
+def safe_polygons(geom):
+    if geom is None or geom.is_empty:
         return []
 
-    roads = roads_gdf.to_crs("EPSG:4326").copy()
-    roads["road_class_plot"] = roads.apply(normalize_road_class, axis=1)
+    if geom.geom_type == "Polygon":
+        return [geom]
 
-    used_classes = []
+    if geom.geom_type == "MultiPolygon":
+        return list(geom.geoms)
 
-    for road_class in ROAD_PLOT_ORDER:
-        sub = roads[roads["road_class_plot"] == road_class]
-        if sub.empty:
-            continue
+    return []
 
-        pen = ROAD_CLASS_STYLE.get(road_class, ROAD_CLASS_STYLE["other"])["pen"]
 
-        for geom in safe_iter_geometries(sub):
-            if geom.geom_type == "LineString":
-                lines = [geom]
-            elif geom.geom_type == "MultiLineString":
-                lines = list(geom.geoms)
+def plot_polygons_constant(fig, gdf, fill=None, pen="0.2p,black", label=None):
+    if gdf is None or gdf.empty:
+        return
+
+    first = True
+
+    for geom in gdf.geometry:
+        for poly in safe_polygons(geom):
+            x, y = poly.exterior.xy
+
+            kwargs = {
+                "x": list(x),
+                "y": list(y),
+                "fill": fill,
+                "pen": pen,
+            }
+
+            if label is not None and first:
+                kwargs["label"] = label
+                first = False
+
+            fig.plot(**kwargs)
+
+
+def plot_polygon_3d_at_zkm(fig, gdf, z_km, pen, fill=None, label=None):
+    if gdf is None or gdf.empty:
+        return
+
+    first = True
+
+    for geom in gdf.geometry:
+        for poly in safe_polygons(geom):
+            x, y = poly.exterior.xy
+            x = list(x)
+            y = list(y)
+            z = [z_km] * len(x)
+
+            kwargs = {
+                "x": x,
+                "y": y,
+                "z": z,
+                "pen": pen,
+                "perspective": PERSPECTIVE_3D,
+            }
+
+            if fill is not None:
+                kwargs["fill"] = fill
+
+            if label is not None and first:
+                kwargs["label"] = label
+                first = False
+
+            fig.plot3d(**kwargs)
+
+
+# ============================================================
+# READ INPUTS
+# ============================================================
+
+def read_raw_model(path: Path):
+    if not path.exists():
+        raise FileNotFoundError(f"Raw model file not found: {path}")
+
+    df = pd.read_csv(
+        path,
+        sep=r"\s+",
+        comment="#",
+        header=None,
+        engine="python",
+    )
+
+    df = df.dropna(axis=1, how="all")
+
+    if df.shape[1] < 4:
+        raise ValueError(
+            f"raw.xyz must have 4 columns: x y z slowness. File: {path}"
+        )
+
+    df = df.iloc[:, :4].copy()
+    df.columns = ["x", "y", "z", "slowness"]
+
+    for col in ["x", "y", "z", "slowness"]:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    df = df.dropna(subset=["x", "y", "z", "slowness"]).copy()
+
+    print("========== RAW MODEL ==========")
+    print(f"Input raw model: {path}")
+    print(f"Nodes:           {len(df):,}")
+    print(f"x range:         {df['x'].min()} -> {df['x'].max()}")
+    print(f"y range:         {df['y'].min()} -> {df['y'].max()}")
+    print(f"z range (m):     {df['z'].min()} -> {df['z'].max()}")
+    print(f"slowness range:  {df['slowness'].min()} -> {df['slowness'].max()}")
+    print(f"Coordinates:     {'lon/lat' if coordinates_look_lonlat(df) else 'projected meter'}")
+
+    return df
+
+
+def load_obm_buildings(path: Path):
+    if not path.exists():
+        raise FileNotFoundError(f"OBM building polygon file not found: {path}")
+
+    print("")
+    print("========== LOAD OBM BUILDINGS ==========")
+    print(f"OBM polygon file: {path}")
+
+    gdf = gpd.read_file(path)
+
+    if gdf.empty:
+        raise ValueError(f"OBM GPKG is empty: {path}")
+
+    if gdf.crs is None:
+        print("[WARNING] OBM file has no CRS. Assuming EPSG:4326.")
+        gdf = gdf.set_crs("EPSG:4326")
+
+    gdf = gdf.to_crs("EPSG:4326")
+    gdf = gdf[gdf.geometry.notna()].copy()
+    gdf = gdf[gdf.geometry.geom_type.isin(["Polygon", "MultiPolygon"])].copy()
+
+    aoi = get_aoi_gdf()
+
+    n_before = len(gdf)
+
+    try:
+        gdf = gpd.clip(gdf, aoi).copy()
+    except Exception as exc:
+        print(f"[WARNING] gpd.clip failed, using intersects only: {exc}")
+        gdf = gdf[gdf.intersects(aoi.geometry.iloc[0])].copy()
+
+    gdf = gdf[gdf.geometry.notna() & (~gdf.geometry.is_empty)].copy()
+
+    print(f"Buildings before clip: {n_before:,}")
+    print(f"Buildings after clip:  {len(gdf):,}")
+
+    if HEIGHT_COLUMN in gdf.columns:
+        gdf[HEIGHT_COLUMN] = pd.to_numeric(gdf[HEIGHT_COLUMN], errors="coerce")
+        print(f"Height column:         {HEIGHT_COLUMN}")
+        print(f"Height valid count:    {gdf[HEIGHT_COLUMN].notna().sum():,}")
+        print(f"Height max:            {gdf[HEIGHT_COLUMN].max()}")
+    else:
+        print(f"[WARNING] Height column not found: {HEIGHT_COLUMN}")
+
+    return gdf
+
+
+def select_highrise_buildings(buildings):
+    if buildings is None or buildings.empty:
+        raise ValueError("No building polygons available for high-rise selection.")
+
+    gdf = buildings.copy()
+
+    if HEIGHT_COLUMN in gdf.columns:
+        vals = pd.to_numeric(gdf[HEIGHT_COLUMN], errors="coerce")
+
+        if vals.notna().sum() > 0 and vals.max() > 0:
+            gdf["_height_for_model"] = vals.fillna(0.0)
+
+            if HIGHRISE_HEIGHT_M is not None:
+                threshold = float(HIGHRISE_HEIGHT_M)
             else:
+                positive = gdf.loc[gdf["_height_for_model"] > 0, "_height_for_model"]
+                threshold = float(np.nanpercentile(positive, HIGHRISE_HEIGHT_PERCENTILE))
+
+            highrise = gdf[gdf["_height_for_model"] >= threshold].copy()
+            method = f"{HEIGHT_COLUMN} >= {threshold:.2f} m"
+
+            print("")
+            print("========== HIGH-RISE SELECTION ==========")
+            print(f"Method:          {method}")
+            print(f"All buildings:   {len(gdf):,}")
+            print(f"High-rise count: {len(highrise):,}")
+
+            if highrise.empty:
+                raise ValueError("High-rise selection is empty. Lower threshold.")
+
+            return highrise, method
+
+    # Fallback: select largest footprints by area.
+    centroid = gdf.geometry.unary_union.centroid
+    zone = int(np.floor((centroid.x + 180.0) / 6.0) + 1)
+    epsg = 32600 + zone if centroid.y >= 0 else 32700 + zone
+
+    gdf_m = gdf.to_crs(epsg)
+    areas = gdf_m.geometry.area
+
+    threshold = float(np.nanpercentile(areas, HIGHRISE_HEIGHT_PERCENTILE))
+    highrise = gdf.loc[areas >= threshold].copy()
+
+    method = f"footprint area >= P{HIGHRISE_HEIGHT_PERCENTILE}"
+
+    print("")
+    print("========== HIGH-RISE SELECTION ==========")
+    print(f"Method:          {method}")
+    print(f"All buildings:   {len(gdf):,}")
+    print(f"High-rise count: {len(highrise):,}")
+
+    if highrise.empty:
+        raise ValueError("High-rise footprint selection is empty.")
+
+    return highrise, method
+
+
+# ============================================================
+# MIXED MODEL
+# ============================================================
+
+def find_nodes_inside_highrise(raw_df, highrise_gdf):
+    """
+    Assign high-rise flag by unique x/y, then merge to all z layers.
+    """
+    xy_df = raw_df[["x", "y"]].drop_duplicates().reset_index(drop=True).copy()
+    xy_df["xy_id"] = xy_df.index
+
+    points_gdf = gpd.GeoDataFrame(
+        xy_df,
+        geometry=gpd.points_from_xy(xy_df["x"], xy_df["y"]),
+        crs="EPSG:4326",
+    )
+
+    highrise = highrise_gdf.to_crs("EPSG:4326").copy()
+    highrise = highrise[highrise.geometry.notna() & (~highrise.geometry.is_empty)].copy()
+
+    joined = gpd.sjoin(
+        points_gdf,
+        highrise[["geometry"]],
+        how="left",
+        predicate="within",
+    )
+
+    inside_ids = joined.loc[joined["index_right"].notna(), "xy_id"].unique()
+
+    xy_df["inside_highrise"] = False
+    xy_df.loc[xy_df["xy_id"].isin(inside_ids), "inside_highrise"] = True
+
+    raw_out = raw_df.merge(
+        xy_df[["x", "y", "inside_highrise"]],
+        on=["x", "y"],
+        how="left",
+    )
+
+    raw_out["inside_highrise"] = raw_out["inside_highrise"].fillna(False)
+
+    if SET_FULL_VERTICAL_COLUMN_NO_FLY:
+        z_mask = np.ones(len(raw_out), dtype=bool)
+    else:
+        z_mask = (
+            (raw_out["z"].to_numpy() >= MIN_HIGHRISE_Z_M)
+            & (raw_out["z"].to_numpy() <= MAX_HIGHRISE_Z_M)
+        )
+
+    highrise_node_mask = raw_out["inside_highrise"].to_numpy() & z_mask
+
+    print("")
+    print("========== HIGH-RISE NODE OVERLAY ==========")
+    print(f"Unique xy nodes:             {len(xy_df):,}")
+    print(f"xy inside high-rise:         {int(xy_df['inside_highrise'].sum()):,}")
+    print(f"3D nodes inside high-rise:   {int(highrise_node_mask.sum()):,}")
+    print(f"Full vertical column no-fly: {SET_FULL_VERTICAL_COLUMN_NO_FLY}")
+
+    return raw_out, highrise_node_mask
+
+
+def create_mixed_model(raw_df, highrise_gdf):
+    raw_with_flags, highrise_node_mask = find_nodes_inside_highrise(
+        raw_df=raw_df,
+        highrise_gdf=highrise_gdf,
+    )
+
+    mixed = raw_with_flags.copy()
+
+    mixed["original_slowness"] = mixed["slowness"].copy()
+    mixed["existing_nofly"] = (mixed["original_slowness"] >= NO_FLY_SLOWNESS).astype(int)
+    mixed["highrise_nofly"] = highrise_node_mask.astype(int)
+
+    # Only set high-rise regions to no-fly.
+    # Existing no-fly zones remain untouched.
+    mixed.loc[highrise_node_mask, "slowness"] = NO_FLY_SLOWNESS
+
+    # Categorical class:
+    # 0 = flyable
+    # 1 = existing no-fly
+    # 2 = high-rise no-fly
+    mixed["slowness_class"] = 0
+    mixed.loc[mixed["existing_nofly"] == 1, "slowness_class"] = 1
+    mixed.loc[mixed["highrise_nofly"] == 1, "slowness_class"] = 2
+
+    changed = mixed["slowness"] != mixed["original_slowness"]
+
+    print("")
+    print("========== MIXED MODEL RESULT ==========")
+    print(f"Total nodes:                   {len(mixed):,}")
+    print(f"Nodes changed to high-rise NF: {int(changed.sum()):,}")
+    print(f"Existing no-fly nodes kept:    {int((mixed['existing_nofly'] == 1).sum()):,}")
+    print(f"Final no-fly nodes:            {int((mixed['slowness'] >= NO_FLY_SLOWNESS).sum()):,}")
+    print(f"Final slowness range:          {mixed['slowness'].min()} -> {mixed['slowness'].max()}")
+
+    return mixed
+
+
+def save_mixed_xyz(mixed_df, out_file):
+    out_df = mixed_df[["x", "y", "z", "slowness"]].copy()
+
+    out_df.to_csv(
+        out_file,
+        sep=" ",
+        index=False,
+        header=False,
+        float_format="%.8f",
+    )
+
+    print(f"[OK] Saved mixed model XYZ: {out_file}")
+
+
+# ============================================================
+# VTK EXPORT
+# ============================================================
+
+def write_legacy_structured_grid_vtk(df, out_file, scalar_col="slowness"):
+    """
+    Write full mixed model as legacy ASCII STRUCTURED_GRID VTK.
+
+    VTK coordinate conversion:
+        lon/lat model:
+            x = lon
+            y = lat
+            z = z_m / 1000
+        projected-meter model:
+            x = x_m / 1000
+            y = y_m / 1000
+            z = z_m / 1000
+    """
+    xs = np.sort(df["x"].unique())
+    ys = np.sort(df["y"].unique())
+    zs = np.sort(df["z"].unique())
+
+    nx, ny, nz = len(xs), len(ys), len(zs)
+    expected = nx * ny * nz
+
+    if expected != len(df):
+        print(
+            "[WARNING] Model is not a complete structured grid. "
+            "Writing mixed_model.vtk as POLYDATA instead."
+        )
+        write_legacy_polydata_nodes_vtk(
+            df=df,
+            out_file=out_file,
+            scalar_col=scalar_col,
+        )
+        return
+
+    work = df.copy()
+    xvtk, yvtk, zvtk, vtk_units = vtk_coordinate_arrays(work)
+
+    work["_xvtk"] = xvtk
+    work["_yvtk"] = yvtk
+    work["_zvtk"] = zvtk
+
+    lookup = work.set_index(["x", "y", "z"])
+
+    points = []
+    slowness = []
+    original_slowness = []
+    existing_nofly = []
+    highrise_nofly = []
+    slowness_class = []
+
+    for z in zs:
+        for y in ys:
+            for x in xs:
+                row = lookup.loc[(x, y, z)]
+
+                points.append((row["_xvtk"], row["_yvtk"], row["_zvtk"]))
+                slowness.append(float(row["slowness"]))
+                original_slowness.append(float(row["original_slowness"]))
+                existing_nofly.append(int(row["existing_nofly"]))
+                highrise_nofly.append(int(row["highrise_nofly"]))
+                slowness_class.append(int(row["slowness_class"]))
+
+    with open(out_file, "w", encoding="utf-8") as f:
+        f.write("# vtk DataFile Version 3.0\n")
+        f.write(f"mixed_model_structured_grid coordinate_units={vtk_units}\n")
+        f.write("ASCII\n")
+        f.write("DATASET STRUCTURED_GRID\n")
+        f.write(f"DIMENSIONS {nx} {ny} {nz}\n")
+        f.write(f"POINTS {len(points)} float\n")
+
+        for x, y, z in points:
+            f.write(f"{x:.8f} {y:.8f} {z:.8f}\n")
+
+        f.write(f"\nPOINT_DATA {len(points)}\n")
+
+        f.write("SCALARS slowness float 1\n")
+        f.write("LOOKUP_TABLE default\n")
+        for v in slowness:
+            f.write(f"{v:.8f}\n")
+
+        f.write("\nSCALARS original_slowness float 1\n")
+        f.write("LOOKUP_TABLE default\n")
+        for v in original_slowness:
+            f.write(f"{v:.8f}\n")
+
+        f.write("\nSCALARS existing_nofly int 1\n")
+        f.write("LOOKUP_TABLE default\n")
+        for v in existing_nofly:
+            f.write(f"{v}\n")
+
+        f.write("\nSCALARS highrise_nofly int 1\n")
+        f.write("LOOKUP_TABLE default\n")
+        for v in highrise_nofly:
+            f.write(f"{v}\n")
+
+        f.write("\nSCALARS slowness_class int 1\n")
+        f.write("LOOKUP_TABLE default\n")
+        for v in slowness_class:
+            f.write(f"{v}\n")
+
+    print(f"[OK] Saved structured-grid VTK: {out_file}")
+    print(f"[INFO] VTK coordinate units: {vtk_units}")
+
+
+def write_legacy_polydata_nodes_vtk(df, out_file, scalar_col="slowness"):
+    """
+    Write model nodes as legacy ASCII POLYDATA VTK.
+    """
+    work = df.copy()
+    xvtk, yvtk, zvtk, vtk_units = vtk_coordinate_arrays(work)
+
+    work["_xvtk"] = xvtk
+    work["_yvtk"] = yvtk
+    work["_zvtk"] = zvtk
+
+    n = len(work)
+
+    with open(out_file, "w", encoding="utf-8") as f:
+        f.write("# vtk DataFile Version 3.0\n")
+        f.write(f"mixed_model_nodes coordinate_units={vtk_units}\n")
+        f.write("ASCII\n")
+        f.write("DATASET POLYDATA\n")
+        f.write(f"POINTS {n} float\n")
+
+        for row in work.itertuples(index=False):
+            f.write(f"{row._xvtk:.8f} {row._yvtk:.8f} {row._zvtk:.8f}\n")
+
+        f.write(f"\nVERTICES {n} {2 * n}\n")
+        for i in range(n):
+            f.write(f"1 {i}\n")
+
+        scalar_columns = [
+            ("slowness", "float"),
+            ("original_slowness", "float"),
+            ("existing_nofly", "int"),
+            ("highrise_nofly", "int"),
+            ("slowness_class", "int"),
+        ]
+
+        f.write(f"\nPOINT_DATA {n}\n")
+
+        for col, vtk_type in scalar_columns:
+            if col not in work.columns:
                 continue
 
-            for line in lines:
-                coords = np.asarray(line.coords)
-                if coords.shape[0] >= 2:
-                    fig.plot(x=coords[:, 0], y=coords[:, 1], pen=pen)
+            f.write(f"SCALARS {col} {vtk_type} 1\n")
+            f.write("LOOKUP_TABLE default\n")
 
-        used_classes.append(road_class)
+            for v in work[col].to_numpy():
+                if vtk_type == "int":
+                    f.write(f"{int(v)}\n")
+                else:
+                    f.write(f"{float(v):.8f}\n")
 
-    return used_classes
+            f.write("\n")
+
+    print(f"[OK] Saved node POLYDATA VTK: {out_file}")
+    print(f"[INFO] VTK coordinate units: {vtk_units}")
 
 
-def add_road_class_legend(fig: pygmt.Figure, used_classes: list[str]) -> None:
-    if not used_classes:
-        return
+def write_model_cage_vtk(df, out_file):
+    """
+    Write rectangular model cage as POLYDATA lines.
 
-    dummy_x = [-1000, -999]
-    dummy_y = [-1000, -1000]
+    Cage coordinates follow same VTK coordinate conversion rule:
+        lon/lat model: x/y lonlat, z km
+        projected-meter model: x/y/z km
+    """
+    xmin, xmax = float(df["x"].min()), float(df["x"].max())
+    ymin, ymax = float(df["y"].min()), float(df["y"].max())
+    zmin, zmax = float(df["z"].min()), float(df["z"].max())
 
-    for road_class in used_classes:
-        style = ROAD_CLASS_STYLE.get(road_class, ROAD_CLASS_STYLE["other"])
-        fig.plot(
-            x=dummy_x,
-            y=dummy_y,
-            pen=style["pen"],
-            label=style["label"],
-        )
+    cage_df = pd.DataFrame(
+        {
+            "x": [xmin, xmax, xmax, xmin, xmin, xmax, xmax, xmin],
+            "y": [ymin, ymin, ymax, ymax, ymin, ymin, ymax, ymax],
+            "z": [zmin, zmin, zmin, zmin, zmax, zmax, zmax, zmax],
+        }
+    )
 
-    fig.legend(position=ROAD_LEGEND_POSITION, box=ROAD_LEGEND_BOX)
+    xvtk, yvtk, zvtk, vtk_units = vtk_coordinate_arrays(cage_df)
+
+    points = list(zip(xvtk, yvtk, zvtk))
+
+    lines = [
+        (0, 1), (1, 2), (2, 3), (3, 0),
+        (4, 5), (5, 6), (6, 7), (7, 4),
+        (0, 4), (1, 5), (2, 6), (3, 7),
+    ]
+
+    with open(out_file, "w", encoding="utf-8") as f:
+        f.write("# vtk DataFile Version 3.0\n")
+        f.write(f"mixed_model_cage coordinate_units={vtk_units}\n")
+        f.write("ASCII\n")
+        f.write("DATASET POLYDATA\n")
+        f.write(f"POINTS {len(points)} float\n")
+
+        for x, y, z in points:
+            f.write(f"{x:.8f} {y:.8f} {z:.8f}\n")
+
+        f.write(f"\nLINES {len(lines)} {len(lines) * 3}\n")
+
+        for i, j in lines:
+            f.write(f"2 {i} {j}\n")
+
+    print(f"[OK] Saved model cage VTK: {out_file}")
+    print(f"[INFO] VTK coordinate units: {vtk_units}")
 
 
 # ============================================================
-# 4. RASTER HELPERS
+# CATEGORICAL PLOTS
 # ============================================================
 
-def robust_zrange_from_raster(raster_path: Path, lower: float = 2, upper: float = 98) -> tuple[float, float]:
-    with rasterio.open(raster_path) as src:
-        arr = src.read(1).astype(float)
-        nodata = src.nodata
-
-    if nodata is not None:
-        arr = np.where(arr == nodata, np.nan, arr)
-
-    vals = arr[np.isfinite(arr)]
-
-    if vals.size == 0:
-        return 0.0, 1.0
-
-    zmin = float(np.nanpercentile(vals, lower))
-    zmax = float(np.nanpercentile(vals, upper))
-
-    if np.isclose(zmin, zmax):
-        zmin = float(np.nanmin(vals))
-        zmax = float(np.nanmax(vals))
-
-    if np.isclose(zmin, zmax):
-        zmin -= 1.0
-        zmax += 1.0
-
-    return zmin, zmax
-
-
-def reproject_raster_to_wgs84_if_needed(raster_path: Path) -> Path:
+def get_topview_nodes(mixed_df):
     """
-    PyGMT map region/projection is lon/lat.
-    If input raster is projected, reproject it to EPSG:4326 in TMP_DIR.
+    Build categorical 2D top-view model.
+
+    Priority:
+        high-rise no-fly > existing no-fly > flyable
     """
-    raster_path = Path(raster_path)
+    df = mixed_df.copy()
 
-    with rasterio.open(raster_path) as src:
-        src_crs = src.crs
-
-        if src_crs is not None and src_crs.to_epsg() == 4326:
-            return raster_path
-
-        out_path = TMP_DIR / f"{raster_path.stem}_epsg4326.tif"
-
-        if out_path.exists() and out_path.stat().st_size > 0:
-            return out_path
-
-        dst_crs = "EPSG:4326"
-
-        transform, width, height = rasterio.warp.calculate_default_transform(
-            src.crs,
-            dst_crs,
-            src.width,
-            src.height,
-            *src.bounds,
+    top = (
+        df.groupby(["x", "y"], as_index=False)
+        .agg(
+            max_slowness=("slowness", "max"),
+            existing_nofly=("existing_nofly", "max"),
+            highrise_nofly=("highrise_nofly", "max"),
         )
-
-        profile = src.profile.copy()
-        profile.update(
-            {
-                "crs": dst_crs,
-                "transform": transform,
-                "width": width,
-                "height": height,
-                "compress": "lzw",
-            }
-        )
-
-        with rasterio.open(out_path, "w", **profile) as dst:
-            for band_id in range(1, src.count + 1):
-                rasterio.warp.reproject(
-                    source=rasterio.band(src, band_id),
-                    destination=rasterio.band(dst, band_id),
-                    src_transform=src.transform,
-                    src_crs=src.crs,
-                    dst_transform=transform,
-                    dst_crs=dst_crs,
-                    resampling=Resampling.bilinear,
-                )
-
-    print(f"[OK] Reprojected raster to WGS84: {out_path}")
-    return out_path
-
-
-def clip_raster_to_aoi_wgs84(raster_path: Path, aoi: gpd.GeoDataFrame) -> Path:
-    """
-    Clip raster to AOI after ensuring raster is EPSG:4326.
-    """
-    raster_path = reproject_raster_to_wgs84_if_needed(raster_path)
-    out_path = TMP_DIR / f"{raster_path.stem}_clip_aoi.tif"
-
-    if out_path.exists() and out_path.stat().st_size > 0:
-        return out_path
-
-    aoi_wgs84 = aoi.to_crs("EPSG:4326")
-
-    with rasterio.open(raster_path) as src:
-        shapes = [mapping(geom) for geom in aoi_wgs84.geometry if geom is not None and not geom.is_empty]
-
-        out_image, out_transform = rasterio.mask.mask(
-            src,
-            shapes,
-            crop=True,
-            nodata=src.nodata,
-            filled=True,
-        )
-
-        profile = src.profile.copy()
-        profile.update(
-            {
-                "height": out_image.shape[1],
-                "width": out_image.shape[2],
-                "transform": out_transform,
-                "compress": "lzw",
-            }
-        )
-
-        with rasterio.open(out_path, "w", **profile) as dst:
-            dst.write(out_image)
-
-    print(f"[OK] Clipped raster to AOI: {out_path}")
-    return out_path
-
-
-def plot_raster_map(
-    raster_path: Path,
-    aoi: gpd.GeoDataFrame,
-    region: list[float],
-    out_png: Path,
-    title: str,
-    cmap: str,
-    label: str,
-    continuous: bool = True,
-    show_colorbar: bool = True,
-    fixed_zrange: tuple[float, float] | None = None,
-    overlay_roads: gpd.GeoDataFrame | None = None,
-    overlay_buildings: gpd.GeoDataFrame | None = None,
-) -> None:
-    if not raster_path.exists():
-        print(f"[WARN] Raster missing, skip: {raster_path}")
-        return
-
-    clipped = clip_raster_to_aoi_wgs84(raster_path, aoi)
-
-    if fixed_zrange is None:
-        zmin, zmax = robust_zrange_from_raster(clipped)
-    else:
-        zmin, zmax = fixed_zrange
-
-    if not np.isfinite(zmin) or not np.isfinite(zmax) or np.isclose(zmin, zmax):
-        zmin, zmax = 0.0, 1.0
-
-    step = (zmax - zmin) / 100.0
-    if not np.isfinite(step) or step <= 0:
-        step = 1.0
-
-    fig = start_map(region, title)
-
-    pygmt.makecpt(
-        cmap=cmap,
-        series=[zmin, zmax, step],
-        continuous=continuous,
     )
 
-    fig.grdimage(
-        grid=str(clipped),
-        cmap=True,
-        nan_transparent=True,
-    )
+    top["slowness_class"] = 0
+    top.loc[top["existing_nofly"] == 1, "slowness_class"] = 1
+    top.loc[top["highrise_nofly"] == 1, "slowness_class"] = 2
 
-    if OVERLAY_BUILDINGS_ON_RASTERS and overlay_buildings is not None:
-        plot_polygons_from_gdf(fig, overlay_buildings, fill="lightred@80", pen="0.15p,black@60")
-
-    if OVERLAY_ROADS_ON_RASTERS and overlay_roads is not None:
-        plot_lines_from_gdf(fig, overlay_roads, pen="0.35p,black@30")
-
-    if OVERLAY_AOI_ON_ALL_MAPS:
-        plot_aoi_boundary(fig, aoi)
-
-    if show_colorbar:
-        fig.colorbar(
-            frame=f'af+l"{label}"',
-            position="JBC+w10c/0.35c+h+o0c/0.8c",
-        )
-
-    save_fig(fig, out_png)
+    return top
 
 
-# ============================================================
-# 5. INDIVIDUAL MAPS
-# ============================================================
+def plot_2d_model_categorical(mixed_df, highrise_gdf, region, out_png):
+    print("")
+    print("========== PLOT 2D CATEGORICAL MODEL ==========")
 
-def plot_overview_map(
-    aoi: gpd.GeoDataFrame,
-    roads: gpd.GeoDataFrame | None,
-    buildings: gpd.GeoDataFrame | None,
-    region: list[float],
-    out_png: Path,
-) -> None:
-    print("\n[INFO] Creating overview map")
+    top = get_topview_nodes(mixed_df)
 
-    fig = start_map(region, "Hoa Lac overview map: Buildings + Roads")
+    fig = start_map(region, "Final mixed model: categorical 2D nodes")
 
-    plot_polygons_from_gdf(
-        fig,
-        buildings,
-        fill=BUILDING_FILL,
-        pen=BUILDING_PEN,
-    )
+    for cat in [0, 1, 2]:
+        sub = top[top["slowness_class"] == cat].copy()
 
-    plot_lines_from_gdf(
-        fig,
-        roads,
-        pen=ROAD_PEN,
-    )
-
-    plot_aoi_boundary(fig, aoi)
-
-    # Legend
-    fig.plot(x=[-1000], y=[-1000], style="s0.25c", fill=BUILDING_FILL, pen=BUILDING_PEN, label="Building polygon")
-    fig.plot(x=[-1000, -999], y=[-1000, -1000], pen=ROAD_PEN, label="Road")
-    fig.plot(x=[-1000, -999], y=[-1000, -1000], pen=POLYGON_PEN, label="Hoa Lac boundary")
-
-    fig.legend(
-        position=LEGEND_POSITION,
-        box=f"+g{LEGEND_BOX_FILL}+p{LEGEND_BOX_PEN}",
-    )
-
-    save_fig(fig, out_png)
-
-
-def plot_aoi_map(aoi: gpd.GeoDataFrame, region: list[float], out_png: Path) -> None:
-    print("\n[INFO] Creating AOI map")
-
-    fig = start_map(region, "Hoa Lac study-area AOI")
-
-    # Fill AOI polygon lightly
-    plot_polygons_from_gdf(fig, aoi, fill="purple@85", pen=POLYGON_PEN)
-    plot_aoi_boundary(fig, aoi)
-
-    fig.plot(x=[-1000], y=[-1000], style="s0.25c", fill="purple@85", pen=POLYGON_PEN, label="Study area")
-    fig.legend(position=LEGEND_POSITION, box=f"+g{LEGEND_BOX_FILL}+p{LEGEND_BOX_PEN}")
-
-    save_fig(fig, out_png)
-
-
-def plot_roads_class_map(
-    aoi: gpd.GeoDataFrame,
-    roads: gpd.GeoDataFrame | None,
-    region: list[float],
-    out_png: Path,
-) -> None:
-    print("\n[INFO] Creating road-class map")
-
-    if roads is None or roads.empty:
-        print("[WARN] Roads are missing or empty, skip road-class map.")
-        return
-
-    fig = start_map(region, "OSM roads by road class")
-
-    used_classes = plot_lines_by_road_class(fig, roads)
-    plot_aoi_boundary(fig, aoi)
-    add_road_class_legend(fig, used_classes)
-
-    save_fig(fig, out_png)
-
-
-def plot_road_summary_csv(csv_file: Path, out_png: Path) -> None:
-    print("\n[INFO] Creating road summary chart")
-
-    if not csv_file.exists():
-        print(f"[WARN] Road summary CSV missing, skip: {csv_file}")
-        return
-
-    df = pd.read_csv(csv_file)
-
-    if df.empty:
-        print("[WARN] Road summary CSV is empty, skip.")
-        return
-
-    # Prefer total_length_km if available.
-    if "total_length_km" not in df.columns:
-        if "total_length_m" in df.columns:
-            df["total_length_km"] = df["total_length_m"] / 1000.0
-        else:
-            print("[WARN] No length column in road summary CSV, skip chart.")
-            return
-
-    df = df.sort_values("total_length_km", ascending=True)
-
-    fig, ax = plt.subplots(figsize=(9, 5))
-    ax.barh(df["road_class"].astype(str), df["total_length_km"])
-    ax.set_xlabel("Total road length (km)")
-    ax.set_ylabel("Road class")
-    ax.set_title("Hoa Lac OSM road-class summary")
-    ax.grid(axis="x", alpha=0.3)
-
-    for i, v in enumerate(df["total_length_km"]):
-        ax.text(v, i, f" {v:.2f}", va="center", fontsize=8)
-
-    fig.tight_layout()
-    out_png.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(out_png, dpi=DPI)
-    plt.close(fig)
-
-    print(f"[OK] Saved: {out_png}")
-
-
-def select_extra_tag(row) -> str:
-    """
-    Pick one tag to represent an OSM extra feature.
-    """
-    for tag in EXTRA_TAG_PRIORITY:
-        if tag in row.index:
-            val = row[tag]
-            if val is not None and not pd.isna(val):
-                return tag
-    return "other"
-
-
-def plot_osm_extra_features_map(
-    aoi: gpd.GeoDataFrame,
-    extra: gpd.GeoDataFrame | None,
-    region: list[float],
-    out_png: Path,
-) -> None:
-    print("\n[INFO] Creating OSM extra-features map")
-
-    if extra is None or extra.empty:
-        print("[WARN] OSM extra features missing or empty, skip.")
-        return
-
-    extra = extra.to_crs("EPSG:4326").copy()
-    extra["plot_tag"] = extra.apply(select_extra_tag, axis=1)
-
-    fig = start_map(region, "OSM extra features")
-
-    used_tags = []
-
-    for tag in EXTRA_TAG_PRIORITY:
-        sub = extra[extra["plot_tag"] == tag]
         if sub.empty:
             continue
 
-        style = EXTRA_TAG_STYLE.get(tag, {})
-        fill = style.get("fill", EXTRA_POLYGON_FILL)
-        pen = style.get("pen", EXTRA_LINE_PEN)
+        style = CATEGORY_STYLES[cat]
 
-        poly_gdf = sub[sub.geometry.geom_type.isin(["Polygon", "MultiPolygon"])]
-        line_gdf = sub[sub.geometry.geom_type.isin(["LineString", "MultiLineString"])]
-        point_gdf = sub[sub.geometry.geom_type.isin(["Point", "MultiPoint"])]
-
-        if not poly_gdf.empty:
-            plot_polygons_from_gdf(fig, poly_gdf, fill=fill, pen=pen)
-
-        if not line_gdf.empty:
-            plot_lines_from_gdf(fig, line_gdf, pen=pen)
-
-        if not point_gdf.empty:
-            plot_points_from_gdf(fig, point_gdf, fill=EXTRA_POINT_FILL, pen="0.1p,black")
-
-        used_tags.append(tag)
-
-    plot_aoi_boundary(fig, aoi)
-
-    # Legend using dummy objects
-    for tag in used_tags:
-        style = EXTRA_TAG_STYLE.get(tag, {})
-        fill = style.get("fill", EXTRA_POLYGON_FILL)
-        pen = style.get("pen", EXTRA_LINE_PEN)
-        label = style.get("label", tag)
-
-        if fill is None:
-            fig.plot(x=[-1000, -999], y=[-1000, -1000], pen=pen, label=label)
-        else:
-            fig.plot(x=[-1000], y=[-1000], style="s0.23c", fill=fill, pen=pen, label=label)
-
-    fig.legend(position=LEGEND_POSITION, box=f"+g{LEGEND_BOX_FILL}+p{LEGEND_BOX_PEN}")
-
-    save_fig(fig, out_png)
-
-
-def plot_building_map(
-    aoi: gpd.GeoDataFrame,
-    buildings: gpd.GeoDataFrame | None,
-    region: list[float],
-    out_png: Path,
-) -> None:
-    print("\n[INFO] Creating OpenBuildingMap buildings map")
-
-    if buildings is None or buildings.empty:
-        print("[WARN] OBM building file missing or empty, skip.")
-        return
-
-    buildings = buildings.to_crs("EPSG:4326").copy()
-
-    fig = start_map(region, "OpenBuildingMap buildings")
-
-    if PLOT_BUILDINGS_BY_HEIGHT and BUILDING_HEIGHT_COLUMN in buildings.columns:
-        buildings[BUILDING_HEIGHT_COLUMN] = pd.to_numeric(
-            buildings[BUILDING_HEIGHT_COLUMN],
-            errors="coerce",
+        fig.plot(
+            x=sub["x"],
+            y=sub["y"],
+            style=style["style_2d"],
+            fill=style["fill"],
+            pen=None if cat == 0 else "0.1p,black",
+            transparency=style["transparency_2d"],
+            label=style["name"],
         )
 
-        valid = buildings.dropna(subset=[BUILDING_HEIGHT_COLUMN]).copy()
+        print(f"2D category {cat} {style['name']}: {len(sub):,} xy nodes")
 
-        if valid.empty:
-            print(f"[WARN] No valid numeric values in {BUILDING_HEIGHT_COLUMN}. Plot normal buildings.")
-            plot_polygons_from_gdf(fig, buildings, fill=BUILDING_FILL, pen=BUILDING_PEN)
+    if PLOT_HIGHRISE_FOOTPRINT_ON_2D:
+        plot_polygons_constant(
+            fig,
+            highrise_gdf,
+            fill=HIGHRISE_FILL,
+            pen=HIGHRISE_PEN,
+            label="High-rise footprint",
+        )
 
-        else:
-            zmin = float(valid[BUILDING_HEIGHT_COLUMN].quantile(0.02))
-            zmax = float(valid[BUILDING_HEIGHT_COLUMN].quantile(0.98))
+    plot_aoi_boundary(fig)
 
-            if np.isclose(zmin, zmax):
-                zmin = float(valid[BUILDING_HEIGHT_COLUMN].min())
-                zmax = float(valid[BUILDING_HEIGHT_COLUMN].max())
+    fig.legend(
+        position="JBL+jBL+o0.2c/0.2c",
+        box="+gwhite@10+p0.5p,black",
+    )
 
-            if np.isclose(zmin, zmax):
-                zmin, zmax = 0.0, 10.0
+    fig.savefig(str(out_png), dpi=DPI)
+    print(f"[OK] Saved 2D categorical model figure: {out_png}")
 
-            step = (zmax - zmin) / 100.0
 
-            pygmt.makecpt(
-                cmap="turbo",
-                series=[zmin, zmax, step],
-                continuous=True,
-            )
+def sample_for_3d_plot(df, max_points, random_state=12345):
+    if df is None or df.empty:
+        return df
 
-            for _, row in valid.iterrows():
-                geom = row.geometry
-                value = row[BUILDING_HEIGHT_COLUMN]
+    if max_points is None:
+        return df
 
-                if geom is None or geom.is_empty:
-                    continue
+    if len(df) <= max_points:
+        return df
 
-                if geom.geom_type == "Polygon":
-                    polys = [geom]
-                elif geom.geom_type == "MultiPolygon":
-                    polys = list(geom.geoms)
-                else:
-                    continue
+    return df.sample(
+        n=max_points,
+        random_state=random_state,
+    ).copy()
 
-                for poly in polys:
-                    x, y = poly.exterior.xy
-                    fig.plot(
-                        x=list(x),
-                        y=list(y),
-                        fill=value,
-                        cmap=True,
-                        pen=BUILDING_PEN,
-                    )
 
-            fig.colorbar(
-                frame=f'af+l"Building height (m)"',
-                position="JBC+w10c/0.35c+h+o0c/0.8c",
-            )
+def plot_3d_model_categorical_0_100m(mixed_df, highrise_gdf, region, out_png):
+    print("")
+    print("========== PLOT 3D CATEGORICAL MODEL 0-100 M ==========")
 
-    else:
-        plot_polygons_from_gdf(fig, buildings, fill=BUILDING_FILL, pen=BUILDING_PEN)
+    df = mixed_df.copy()
 
-    plot_aoi_boundary(fig, aoi)
+    df = df[
+        (df["z"] >= PLOT_3D_Z_MIN_M)
+        & (df["z"] <= PLOT_3D_Z_MAX_M)
+    ].copy()
 
-    fig.plot(
-        x=[-1000, -999],
-        y=[-1000, -1000],
+    if df.empty:
+        raise ValueError(
+            f"No model nodes found between z={PLOT_3D_Z_MIN_M} and z={PLOT_3D_Z_MAX_M} m."
+        )
+
+    # Plot z in km.
+    df["z_km"] = df["z"] / 1000.0
+
+    xmin, xmax, ymin, ymax = region
+    zmin_km = PLOT_3D_Z_MIN_M / 1000.0
+    zmax_km = PLOT_3D_Z_MAX_M / 1000.0
+
+    region3d = [xmin, xmax, ymin, ymax, zmin_km, zmax_km]
+
+    fig = pygmt.Figure()
+
+    pygmt.config(
+        MAP_FRAME_TYPE="plain",
+        FORMAT_GEO_MAP="ddd:mmF",
+        FONT_LABEL="10p",
+        FONT_ANNOT_PRIMARY="8p",
+    )
+
+    fig.basemap(
+        region=region3d,
+        projection=PROJECTION,
+        zsize=ZSIZE_3D,
+        perspective=PERSPECTIVE_3D,
+        frame=[
+            'WSneZ+t"Final mixed model: categorical 3D nodes 0-100 m"',
+            "xaf+lLongitude",
+            "yaf+lLatitude",
+            "zaf+lElevation (km)",
+        ],
+    )
+
+    category_max_points = {
+        0: MAX_3D_FLYABLE_POINTS,
+        1: MAX_3D_EXISTING_NOFLY_POINTS,
+        2: MAX_3D_HIGHRISE_NOFLY_POINTS,
+    }
+
+    random_seeds = {
+        0: 12345,
+        1: 12346,
+        2: 12347,
+    }
+
+    for cat in [0, 1, 2]:
+        sub = df[df["slowness_class"] == cat].copy()
+        sub = sample_for_3d_plot(
+            sub,
+            max_points=category_max_points[cat],
+            random_state=random_seeds[cat],
+        )
+
+        if sub is None or sub.empty:
+            continue
+
+        style = CATEGORY_STYLES[cat]
+
+        fig.plot3d(
+            x=sub["x"],
+            y=sub["y"],
+            z=sub["z_km"],
+            style=style["style_3d"],
+            fill=style["fill"],
+            pen=None if cat == 0 else "0.1p,black",
+            transparency=style["transparency_3d"],
+            perspective=PERSPECTIVE_3D,
+            label=style["name"],
+        )
+
+        print(f"3D category {cat} {style['name']}: {len(sub):,} plotted nodes")
+
+    if PLOT_HIGHRISE_FOOTPRINT_ON_3D:
+        plot_polygon_3d_at_zkm(
+            fig,
+            highrise_gdf,
+            z_km=zmin_km,
+            pen=HIGHRISE_PEN,
+            fill=HIGHRISE_FILL,
+            label="High-rise footprint",
+        )
+
+        plot_polygon_3d_at_zkm(
+            fig,
+            highrise_gdf,
+            z_km=zmax_km,
+            pen="0.35p,green",
+            fill=None,
+            label=None,
+        )
+
+    poly_df = polygon_to_dataframe()
+    fig.plot3d(
+        x=poly_df["x"],
+        y=poly_df["y"],
+        z=[zmin_km] * len(poly_df),
         pen=POLYGON_PEN,
+        perspective=PERSPECTIVE_3D,
         label="Hoa Lac boundary",
     )
 
     fig.legend(
-        position=LEGEND_POSITION,
-        box=f"+g{LEGEND_BOX_FILL}+p{LEGEND_BOX_PEN}",
+        position="JBL+jBL+o0.2c/0.2c",
+        box="+gwhite@10+p0.5p,black",
     )
 
-    save_fig(fig, out_png)
+    fig.savefig(str(out_png), dpi=DPI)
+    print(f"[OK] Saved 3D categorical model figure: {out_png}")
 
 
 # ============================================================
-# 6. MAIN
+# CLEANUP
 # ============================================================
 
-def main() -> None:
+def cleanup_cpt_and_temp_files():
+    if not CLEANUP_CPT_AND_TEMP_FILES:
+        return
+
+    print("")
+    print("========== CLEANUP TEMP FILES ==========")
+
+    removed = 0
+
+    for folder in [OUT_DIR, FIG_DIR]:
+        for path in folder.glob("*.cpt"):
+            if path.is_file():
+                try:
+                    path.unlink()
+                    removed += 1
+                    print(f"[CLEAN] Removed: {path}")
+                except Exception as exc:
+                    print(f"[WARN] Could not remove {path}: {exc}")
+
+    print(f"[OK] Cleanup done. Removed files: {removed}")
+
+
+# ============================================================
+# MAIN
+# ============================================================
+
+def main():
     warnings.filterwarnings("ignore", category=UserWarning)
     ensure_dirs()
 
-    print("\n========== PLOT HOA LAC STUDY AREA ==========")
-    print(f"[INFO] Input data dir: {DATA_DIR}")
-    print(f"[INFO] Output fig dir: {FIG_DIR}")
+    print("\n========== CREATE MIXED MODEL ==========")
 
-    aoi = get_aoi_gdf()
-    region = get_region_from_aoi(aoi, padding=REGION_PADDING)
+    region = get_region_from_polygon(padding=REGION_PADDING)
 
-    roads = read_gpkg_if_exists(ROADS_GPKG)
-    extra = read_gpkg_if_exists(OSM_EXTRA_GPKG)
-    buildings = read_gpkg_if_exists(OBM_BUILDINGS_GPKG)
+    raw_df = read_raw_model(RAW_MODEL_FILE)
 
-    # Optional plot-time clipping to AOI
-    roads = clip_gdf_to_aoi_for_plot(
-        roads,
-        aoi,
-        enabled=CLIP_ROADS_TO_AOI_FOR_PLOT,
-        layer_name="OSM roads",
+    buildings = load_obm_buildings(OBM_BUILDINGS_GPKG)
+    highrise, highrise_method = select_highrise_buildings(buildings)
+
+    mixed_df = create_mixed_model(
+        raw_df=raw_df,
+        highrise_gdf=highrise,
     )
 
-    extra = clip_gdf_to_aoi_for_plot(
-        extra,
-        aoi,
-        enabled=CLIP_OSM_EXTRA_TO_AOI_FOR_PLOT,
-        layer_name="OSM extra features",
+    save_mixed_xyz(
+        mixed_df=mixed_df,
+        out_file=OUT_MIXED_XYZ,
     )
 
-    buildings = clip_gdf_to_aoi_for_plot(
-        buildings,
-        aoi,
-        enabled=CLIP_BUILDINGS_TO_AOI_FOR_PLOT,
-        layer_name="OBM buildings",
+    write_legacy_structured_grid_vtk(
+        df=mixed_df,
+        out_file=OUT_MIXED_VTK,
+        scalar_col="slowness",
     )
 
-    print(f"[INFO] Plot region: {region}")
+    write_legacy_polydata_nodes_vtk(
+        df=mixed_df,
+        out_file=OUT_MIXED_NODES_VTK,
+        scalar_col="slowness",
+    )
 
-    # Keep overview first, then keep the order of the downloaded output files.
-    plot_jobs = [
-        ("00_overview_map.png", plot_overview_map, {}),
-        ("01_study_area_aoi.png", plot_aoi_map, {}),
-        ("02_osm_roads_edges_by_class.png", plot_roads_class_map, {}),
-        ("03_osm_road_class_summary.png", plot_road_summary_csv, {}),
-        ("04_osm_extra_features.png", plot_osm_extra_features_map, {}),
-        ("05_opentopography_SRTMGL1_dem_wgs84.png", "raster", {
-            "raster_path": DEM_WGS84_TIF,
-            "title": "OpenTopography SRTMGL1 DEM WGS84",
-            "cmap": "geo",
-            "label": "Elevation (m)",
-            "continuous": True,
-            "show_colorbar": True,
-        }),
-        ("06_opentopography_SRTMGL1_dem_utm.png", "raster", {
-            "raster_path": DEM_UTM_TIF,
-            "title": "OpenTopography SRTMGL1 DEM UTM",
-            "cmap": "geo",
-            "label": "Elevation (m)",
-            "continuous": True,
-            "show_colorbar": True,
-        }),
-        ("07_slope_degree.png", "raster", {
-            "raster_path": SLOPE_DEGREE_TIF,
-            "title": "Slope from OpenTopography DEM",
-            "cmap": "turbo",
-            "label": "Slope (degree)",
-            "continuous": True,
-            "show_colorbar": True,
-            "fixed_zrange": None,
-        }),
-        ("08_hillshade.png", "raster", {
-            "raster_path": HILLSHADE_TIF,
-            "title": "Hillshade from OpenTopography DEM",
-            "cmap": "gray",
-            "label": "Hillshade",
-            "continuous": True,
-            "show_colorbar": True,
-            "fixed_zrange": (0.0, 255.0),
-        }),
-        ("09_obm_buildings_hoalac_clipped.png", plot_building_map, {}),
-    ]
+    write_model_cage_vtk(
+        df=mixed_df,
+        out_file=OUT_MIXED_CAGE_VTK,
+    )
 
-    for out_name, job, kwargs in plot_jobs:
-        out_png = FIG_DIR / out_name
+    plot_2d_model_categorical(
+        mixed_df=mixed_df,
+        highrise_gdf=highrise,
+        region=region,
+        out_png=OUT_2D_MODEL_FIG,
+    )
 
-        if job == plot_overview_map:
-            job(aoi=aoi, roads=roads, buildings=buildings, region=region, out_png=out_png)
+    plot_3d_model_categorical_0_100m(
+        mixed_df=mixed_df,
+        highrise_gdf=highrise,
+        region=region,
+        out_png=OUT_3D_MODEL_FIG,
+    )
 
-        elif job == plot_aoi_map:
-            job(aoi=aoi, region=region, out_png=out_png)
-
-        elif job == plot_roads_class_map:
-            job(aoi=aoi, roads=roads, region=region, out_png=out_png)
-
-        elif job == plot_road_summary_csv:
-            job(csv_file=ROAD_SUMMARY_CSV, out_png=out_png)
-
-        elif job == plot_osm_extra_features_map:
-            job(aoi=aoi, extra=extra, region=region, out_png=out_png)
-
-        elif job == plot_building_map:
-            job(aoi=aoi, buildings=buildings, region=region, out_png=out_png)
-
-        elif job == "raster":
-            plot_raster_map(
-                aoi=aoi,
-                region=region,
-                out_png=out_png,
-                overlay_roads=roads,
-                overlay_buildings=buildings,
-                **kwargs,
-            )
-
-        else:
-            raise ValueError(f"Unknown plot job: {job}")
+    cleanup_cpt_and_temp_files()
 
     print("\n========== DONE ==========")
-    print(f"Figures saved in: {FIG_DIR.resolve()}")
+    print(f"Mixed model XYZ:        {OUT_MIXED_XYZ}")
+    print(f"Mixed model VTK:        {OUT_MIXED_VTK}")
+    print(f"Mixed model nodes VTK:  {OUT_MIXED_NODES_VTK}")
+    print(f"Mixed model cage VTK:   {OUT_MIXED_CAGE_VTK}")
+    print(f"2D model figure:        {OUT_2D_MODEL_FIG}")
+    print(f"3D model figure:        {OUT_3D_MODEL_FIG}")
+    print(f"High-rise method:       {highrise_method}")
+    print(f"No-fly slowness:        {NO_FLY_SLOWNESS}")
+    print("VTK units:              x/y lonlat if geographic; z converted from m to km")
 
 
 if __name__ == "__main__":

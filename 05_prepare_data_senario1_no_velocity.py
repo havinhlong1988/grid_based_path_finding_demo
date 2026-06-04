@@ -4,12 +4,13 @@
 """
 Prepare input data for scenario 1 without velocity.
 
-Copies XYZ data for:
-  - roads
-  - buildings
-  - DEM / topography
-  - OSM extra features
-  - KML/KMZ plan exported points/rings
+Copies input data for:
+  - roads XYZ
+  - buildings XYZ
+  - OpenBuildingMaps GPKG
+  - DEM / topography XYZ
+  - OSM extra features XYZ
+  - KML/KMZ plan exported points/rings XYZ
 
 Output:
   input/02_data_senario1_no_velocity/
@@ -37,11 +38,37 @@ COPY_RULES = {
     ],
 
     "buildings": [
+        # XYZ building files
         "output*/**/*building*.xyz",
         "output*/**/*buildings*.xyz",
         "output*/**/*obm*.xyz",
+        "output*/**/*OBM*.xyz",
+        "output*/**/*openbuildingmap*.xyz",
+        "output*/**/*OpenBuildingMap*.xyz",
+        "output*/**/*openbuildingmaps*.xyz",
+        "output*/**/*OpenBuildingMaps*.xyz",
+
         "input*/**/*building*.xyz",
         "input*/**/*buildings*.xyz",
+        "input*/**/*obm*.xyz",
+        "input*/**/*OBM*.xyz",
+
+        # OpenBuildingMaps GPKG files
+        "output*/**/*obm*.gpkg",
+        "output*/**/*OBM*.gpkg",
+        "output*/**/*openbuildingmap*.gpkg",
+        "output*/**/*OpenBuildingMap*.gpkg",
+        "output*/**/*openbuildingmaps*.gpkg",
+        "output*/**/*OpenBuildingMaps*.gpkg",
+        "output*/**/*building*.gpkg",
+        "output*/**/*buildings*.gpkg",
+
+        "input*/**/*obm*.gpkg",
+        "input*/**/*OBM*.gpkg",
+        "input*/**/*openbuildingmap*.gpkg",
+        "input*/**/*OpenBuildingMap*.gpkg",
+        "input*/**/*openbuildingmaps*.gpkg",
+        "input*/**/*OpenBuildingMaps*.gpkg",
     ],
 
     "dem": [
@@ -73,6 +100,12 @@ COPY_RULES = {
     ],
 }
 
+# Allowed file types
+ALLOWED_SUFFIXES = {
+    ".xyz",
+    ".gpkg",
+}
+
 # Avoid copying files from the target directory back into itself
 EXCLUDE_DIRS = {
     OUT_DIR.resolve(),
@@ -93,7 +126,7 @@ def is_inside(child: Path, parent: Path) -> bool:
 
 
 def collect_files(patterns):
-    """Collect unique XYZ files from glob patterns."""
+    """Collect unique input files from glob patterns."""
     files = []
 
     for pattern in patterns:
@@ -101,7 +134,7 @@ def collect_files(patterns):
             if not f.is_file():
                 continue
 
-            if f.suffix.lower() != ".xyz":
+            if f.suffix.lower() not in ALLOWED_SUFFIXES:
                 continue
 
             # skip target output directory
@@ -113,6 +146,7 @@ def collect_files(patterns):
     # remove duplicates while preserving order
     seen = set()
     unique_files = []
+
     for f in files:
         if f not in seen:
             unique_files.append(f)
@@ -148,12 +182,14 @@ def safe_copy(src: Path, dst_dir: Path) -> Path:
 
 def write_manifest(records):
     """Write a simple manifest CSV."""
-    manifest = OUT_DIR / "manifest_copied_xyz_files.csv"
+    manifest = OUT_DIR / "manifest_copied_input_files.csv"
 
     with open(manifest, "w", encoding="utf-8") as f:
-        f.write("category,source_file,copied_file\n")
+        f.write("category,file_type,source_file,copied_file\n")
+
         for category, src, dst in records:
-            f.write(f"{category},{src},{dst}\n")
+            file_type = src.suffix.lower().replace(".", "")
+            f.write(f"{category},{file_type},{src},{dst}\n")
 
     return manifest
 
@@ -178,7 +214,7 @@ def main():
         files = collect_files(patterns)
 
         print(f"\n[{category}]")
-        print(f"Found {len(files)} XYZ file(s)")
+        print(f"Found {len(files)} file(s)")
 
         if len(files) == 0:
             print("  WARNING: no file found")
@@ -187,6 +223,7 @@ def main():
         for src in files:
             dst = safe_copy(src, dst_category_dir)
             records.append((category, src, dst))
+
             print(f"  copied: {src.relative_to(PROJECT_DIR)}")
             print(f"       -> {dst.relative_to(PROJECT_DIR)}")
 
@@ -194,9 +231,9 @@ def main():
 
     print("\n" + "=" * 70)
     print("DONE")
-    print(f"Copied XYZ files : {len(records)}")
-    print(f"Output folder    : {OUT_DIR}")
-    print(f"Manifest         : {manifest}")
+    print(f"Copied files  : {len(records)}")
+    print(f"Output folder : {OUT_DIR}")
+    print(f"Manifest      : {manifest}")
     print("=" * 70)
 
 
